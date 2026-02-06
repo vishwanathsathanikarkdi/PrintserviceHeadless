@@ -1,0 +1,6 @@
+@PrintserviceHeadless_HostAddress = http://localhost:5125
+
+GET {{PrintserviceHeadless_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
