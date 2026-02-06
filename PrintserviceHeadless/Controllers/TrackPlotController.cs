@@ -12,7 +12,7 @@ namespace PrintserviceHeadless.Controllers
     [ApiController]
     [Route("[controller]")]
     public class TrackPlotController : Microsoft.AspNetCore.Mvc.ControllerBase
-    {
+    {   
         [HttpPost("plot")]
         public IActionResult PlotTracks([FromBody] PlotTrackRequest request)
         {
@@ -130,7 +130,7 @@ namespace PrintserviceHeadless.Controllers
             int orientation = config.TryGetProperty("orientation", out var orientElem) ? orientElem.GetInt32() : 1; // default to horizontal
 
             int width = 1200, height = 800;
-            int pointsPerTrack = 50;
+            int pointsPerTrack = 100;
 
             var (trackNames, trackCurves) = ParseTracks(tracks, pointsPerTrack);
 
@@ -165,7 +165,7 @@ namespace PrintserviceHeadless.Controllers
                         var curveTitle = curve.TryGetProperty("title", out var ct) ? ct.GetString() : "Curve";
                         var color = curve.TryGetProperty("colour", out var col) ? col.GetString() : "#000000";
                         var min = curve.TryGetProperty("manualScaleMin", out var cmin) ? cmin.GetDouble() : 0;
-                        var max = curve.TryGetProperty("manualScaleMax", out var cmax) ? cmax.GetDouble() : 100;
+                        var max = curve.TryGetProperty("manualScaleMax", out var cmax) ? cmax.GetDouble() : 1000;
                         var thickness = curve.TryGetProperty("lineThickness", out var th) ? th.GetDouble() : 2;
 
                         var data = GenerateSampleData(min, max, pointsPerTrack);
@@ -203,13 +203,21 @@ namespace PrintserviceHeadless.Controllers
 
                 DrawHorizontalAxesAndGrid(canvas, marginLeft, marginTop, plotWidth, plotHeight, bandHeight, nTracks, pointsPerTrack, trackNames, labelPaint, gridPaint, axisPaint);
 
-                // Draw curves
                 for (int trackBand = 0; trackBand < trackCurves.Count; trackBand++)
                 {
                     var (_, curves) = trackCurves[trackBand];
-                    foreach (var (curveTitle, color, min, max, thickness, data) in curves)
+                    for (int curveIdx = 0; curveIdx < curves.Count; curveIdx++)
                     {
-                        DrawHorizontalCurve(canvas, marginLeft, marginTop, plotWidth, bandHeight, trackBand, pointsPerTrack, min, max, thickness, color, data);
+                        var (curveTitle, color, min, max, thickness, data) = curves[curveIdx];
+                        if (curveIdx == 0)
+                        {
+                            var fillColor = GetRandomSKColor();
+                            DrawHorizontalCurve(canvas, marginLeft, marginTop, plotWidth, bandHeight, trackBand, pointsPerTrack, min, max, thickness, color, data, true, fillColor);
+                        }
+                        else
+                        {
+                            DrawHorizontalCurve(canvas, marginLeft, marginTop, plotWidth, bandHeight, trackBand, pointsPerTrack, min, max, thickness, color, data);
+                        }
                     }
                     // Separator
                     if (trackBand < trackCurves.Count - 1)
@@ -224,13 +232,21 @@ namespace PrintserviceHeadless.Controllers
 
                 DrawVerticalAxesAndGrid(canvas, marginLeft, marginTop, plotWidth, plotHeight, bandWidth, nTracks, pointsPerTrack, trackNames, labelPaint, gridPaint, axisPaint, height, marginBottom);
 
-                // Draw curves
                 for (int trackBand = 0; trackBand < trackCurves.Count; trackBand++)
                 {
                     var (_, curves) = trackCurves[trackBand];
-                    foreach (var (curveTitle, color, min, max, thickness, data) in curves)
+                    for (int curveIdx = 0; curveIdx < curves.Count; curveIdx++)
                     {
-                        DrawVerticalCurve(canvas, marginLeft, marginTop, bandWidth, plotHeight, trackBand, pointsPerTrack, min, max, thickness, color, data);
+                        var (curveTitle, color, min, max, thickness, data) = curves[curveIdx];
+                        if (curveIdx == 0)
+                        {
+                            var fillColor = GetRandomSKColor();
+                            DrawVerticalCurve(canvas, marginLeft, marginTop, bandWidth, plotHeight, trackBand, pointsPerTrack, min, max, thickness, color, data, true, fillColor);
+                        }
+                        else
+                        {
+                            DrawVerticalCurve(canvas, marginLeft, marginTop, bandWidth, plotHeight, trackBand, pointsPerTrack, min, max, thickness, color, data);
+                        }
                     }
                     // Separator
                     if (trackBand < trackCurves.Count - 1)
@@ -245,13 +261,33 @@ namespace PrintserviceHeadless.Controllers
 
         private void DrawHorizontalAxesAndGrid(SKCanvas canvas, int marginLeft, int marginTop, int plotWidth, int plotHeight, float bandHeight, int nTracks, int pointsPerTrack, List<string> trackNames, SKPaint labelPaint, SKPaint gridPaint, SKPaint axisPaint)
         {
-            for (int i = 0; i < nTracks; i++)
+            float minFontSize = 8;
+            float maxFontSize = 18;
+            float fontSize = Math.Max(minFontSize, Math.Min(maxFontSize, bandHeight * 0.6f));
+            labelPaint.TextSize = fontSize;
+
+            float minSpacing = fontSize * 1.5f;
+            int maxLabels = 20; // You can adjust this for your chart
+
+            var labelIndices = GetLabelIndices(nTracks, bandHeight, 0, minSpacing, maxLabels);
+
+            float maxLabelWidth = marginLeft - 10;
+
+            foreach (int i in labelIndices)
             {
                 float y = marginTop + bandHeight * (i + 0.5f);
-                canvas.DrawText(trackNames[i], 10, y + 6, labelPaint);
+                string displayLabel = TruncateLabel(trackNames[i], maxLabelWidth, labelPaint);
+                canvas.DrawText(displayLabel, 10, y + fontSize / 2, labelPaint);
+            }
+
+            // Draw grid lines for all bands
+            for (int i = 0; i < nTracks; i++)
+            {
                 if (i > 0)
                     canvas.DrawLine(marginLeft, marginTop + bandHeight * i, marginLeft + plotWidth, marginTop + bandHeight * i, gridPaint);
             }
+
+            // Draw X axis labels and grid lines as before
             for (int i = 0; i <= pointsPerTrack; i += 10)
             {
                 float x = marginLeft + plotWidth * i / pointsPerTrack;
@@ -262,16 +298,40 @@ namespace PrintserviceHeadless.Controllers
             canvas.DrawLine(marginLeft, marginTop + plotHeight, marginLeft + plotWidth, marginTop + plotHeight, axisPaint);
         }
 
-        private void DrawVerticalAxesAndGrid(SKCanvas canvas, int marginLeft, int marginTop, int plotWidth, int plotHeight, float bandWidth, int nTracks, int pointsPerTrack, List<string> trackNames, SKPaint labelPaint, SKPaint gridPaint, SKPaint axisPaint, int height, int marginBottom)
+        private void DrawVerticalAxesAndGrid(SKCanvas canvas, int marginLeft, int marginTop, int plotWidth, int plotHeight, float bandWidth,
+            int nTracks, int pointsPerTrack, List<string> trackNames, SKPaint labelPaint, SKPaint gridPaint, SKPaint axisPaint, int height, int marginBottom)
         {
-            for (int i = 0; i < nTracks; i++)
+            float minFontSize = 8;
+            float maxFontSize = 18;
+            float fontSize = Math.Max(minFontSize, Math.Min(maxFontSize, bandWidth * 0.6f));
+            labelPaint.TextSize = fontSize;
+
+            // Calculate which Y-axis labels to show based on available space
+            float minSpacing = labelPaint.TextSize * 2f;
+            int maxLabels = 20;
+
+            var labelIndices = GetLabelIndices(nTracks, bandWidth, 0, minSpacing, maxLabels);
+
+            float maxLabelWidth = bandWidth - 4;
+
+            foreach (int i in labelIndices)
             {
                 float x = marginLeft + bandWidth * (i + 0.5f);
-                canvas.DrawText(trackNames[i], x - 30, height - marginBottom + 30, labelPaint);
+                string displayLabel = TruncateLabel(trackNames[i], maxLabelWidth, labelPaint);
+                canvas.DrawText(displayLabel, x - labelPaint.MeasureText(displayLabel) / 2, height - marginBottom + fontSize + 2, labelPaint);
+            }
+
+            // Draw grid lines for all bands
+            for (int i = 0; i < nTracks; i++)
+            {
                 if (i > 0)
                     canvas.DrawLine(marginLeft + bandWidth * i, marginTop, marginLeft + bandWidth * i, marginTop + plotHeight, gridPaint);
             }
-            for (int i = 0; i <= pointsPerTrack; i += 10)
+
+            // Calculate optimal increment for Y-axis labels
+            int increment = CalculateAxisIncrement(pointsPerTrack, plotHeight, labelPaint.TextSize);
+
+            for (int i = 0; i <= pointsPerTrack; i += increment)
             {
                 float y = marginTop + plotHeight * i / pointsPerTrack;
                 canvas.DrawLine(marginLeft, y, marginLeft + plotWidth, y, gridPaint);
@@ -281,7 +341,10 @@ namespace PrintserviceHeadless.Controllers
             canvas.DrawLine(marginLeft, marginTop, marginLeft, marginTop + plotHeight, axisPaint);
         }
 
-        private void DrawHorizontalCurve(SKCanvas canvas, int marginLeft, int marginTop, int plotWidth, float bandHeight, int trackBand, int pointsPerTrack, double min, double max, double thickness, string color, List<double> data)
+        private void DrawHorizontalCurve(
+            SKCanvas canvas, int marginLeft, int marginTop, int plotWidth, float bandHeight, int trackBand,
+            int pointsPerTrack, double min, double max, double thickness, string color, List<double> data,
+            bool fill = false, SKColor? fillColor = null)
         {
             var curvePaint = new SKPaint
             {
@@ -290,6 +353,7 @@ namespace PrintserviceHeadless.Controllers
                 IsAntialias = true,
                 Style = SKPaintStyle.Stroke
             };
+
             var path = new SKPath();
             for (int i = 0; i < data.Count; i++)
             {
@@ -301,10 +365,33 @@ namespace PrintserviceHeadless.Controllers
                 else
                     path.LineTo(x, y);
             }
+
+            if (fill && fillColor.HasValue)
+            {
+                // Close the path to the bottom of the band for filling
+                float lastX = marginLeft + plotWidth * (data.Count - 1) / pointsPerTrack;
+                float baseY = marginTop + bandHeight * (trackBand + 1);
+                path.LineTo(lastX, baseY);
+                path.LineTo(marginLeft, baseY);
+                path.Close();
+
+                using var fillPaint = new SKPaint
+                {
+                    Color = fillColor.Value,
+                    Style = SKPaintStyle.Fill,
+                    IsAntialias = true,
+                    ColorF = new SKColor(fillColor.Value.Red, fillColor.Value.Green, fillColor.Value.Blue, 128) // semi-transparent
+                };
+                canvas.DrawPath(path, fillPaint);
+            }
+
             canvas.DrawPath(path, curvePaint);
         }
 
-        private void DrawVerticalCurve(SKCanvas canvas, int marginLeft, int marginTop, float bandWidth, int plotHeight, int trackBand, int pointsPerTrack, double min, double max, double thickness, string color, List<double> data)
+        private void DrawVerticalCurve(
+            SKCanvas canvas, int marginLeft, int marginTop, float bandWidth, int plotHeight, int trackBand,
+            int pointsPerTrack, double min, double max, double thickness, string color, List<double> data,
+            bool fill = false, SKColor? fillColor = null)
         {
             var curvePaint = new SKPaint
             {
@@ -324,6 +411,26 @@ namespace PrintserviceHeadless.Controllers
                 else
                     path.LineTo(x, y);
             }
+
+            if (fill && fillColor.HasValue)
+            {
+                // Close the path to the right edge of the band for filling
+                float baseX = marginLeft + bandWidth * (trackBand + 1);
+                float lastY = marginTop + plotHeight * (data.Count - 1) / pointsPerTrack;
+                path.LineTo(baseX, lastY);
+                path.LineTo(baseX, marginTop);
+                path.LineTo(marginLeft + bandWidth * trackBand, marginTop);
+                path.Close();
+
+                using var fillPaint = new SKPaint
+                {
+                    Color = fillColor.Value,
+                    Style = SKPaintStyle.Fill,
+                    IsAntialias = true
+                };
+                canvas.DrawPath(path, fillPaint);
+            }
+
             canvas.DrawPath(path, curvePaint);
         }
 
@@ -360,6 +467,79 @@ namespace PrintserviceHeadless.Controllers
             for (int i = 0; i < count; i++)
                 data.Add(rand.NextDouble() * (max - min) + min);
             return data;
+        }
+
+        // Add this helper method to your controller:
+        private SKColor GetRandomSKColor()
+        {
+            var rand = new Random(Guid.NewGuid().GetHashCode());
+            return new SKColor(
+                (byte)rand.Next(64, 256),
+                (byte)rand.Next(64, 256),
+                (byte)rand.Next(64, 256),
+                60 // semi-transparent
+            );
+        }
+
+        private List<int> GetLabelIndices(int nBands, float bandSize, float margin, float minSpacing, int maxLabels)
+        {
+            // Estimate how many labels can fit
+            int possibleLabels = (int)((nBands * bandSize - 2 * margin) / minSpacing);
+            int labelCount = Math.Min(possibleLabels, maxLabels);
+            labelCount = Math.Max(labelCount, 1);
+
+            var indices = new List<int>();
+            if (labelCount == 1)
+            {
+                indices.Add(nBands / 2);
+            }
+            else
+            {
+                for (int i = 0; i < labelCount; i++)
+                {
+                    int idx = (int)Math.Round((double)(i * (nBands - 1) / (labelCount - 1)));
+                    indices.Add(idx);
+                }
+            }
+            return indices;
+        }
+
+        private string TruncateLabel(string label, float maxWidth, SKPaint paint)
+        {
+            if (paint.MeasureText(label) <= maxWidth) return label;
+            while (label.Length > 0 && paint.MeasureText(label + "...") > maxWidth)
+                label = label.Substring(0, label.Length - 1);
+            return label + "...";
+        }
+
+        private int CalculateAxisIncrement(int maxValue, int availableSpace, float fontSize)
+        {
+            // Minimum spacing between labels (1.5x font size for readability)
+            float minSpacing = fontSize * 1.5f;
+            
+            // Maximum number of labels that can fit
+            int maxLabels = (int)(availableSpace / minSpacing);
+            maxLabels = Math.Max(maxLabels, 2); // At least 2 labels (start and end)
+            
+            // Calculate raw increment
+            int rawIncrement = maxValue / (maxLabels - 1);
+            
+            // Round to a "nice" number (10, 20, 50, 100, 200, 500, 1000, etc.)
+            int[] niceNumbers = { 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000 };
+            
+            int increment = niceNumbers[0];
+            foreach (int nice in niceNumbers)
+            {
+                if (nice >= rawIncrement)
+                {
+                    increment = nice;
+                    break;
+                }
+                increment = nice;
+            }
+            
+            // Ensure at least one increment
+            return Math.Max(increment, 1);
         }
     }
 
