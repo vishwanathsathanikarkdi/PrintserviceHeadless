@@ -12,6 +12,7 @@
     <PackageReference Include="OxyPlot.Core" Version="2.2.0" />
     <PackageReference Include="OxyPlot.ImageSharp" Version="2.2.0" />
     <PackageReference Include="PuppeteerSharp" Version="20.2.5" />
+    <PackageReference Include="ScottPlot" Version="5.1.57" />
     <PackageReference Include="Swashbuckle.AspNetCore" Version="6.6.2" />
   </ItemGroup>
 

@@ -12,7 +12,7 @@ namespace PrintserviceHeadless.Controllers
     [ApiController]
     [Route("[controller]")]
     public class TrackPlotController : Microsoft.AspNetCore.Mvc.ControllerBase
-    {   
+    {
         [HttpPost("plot")]
         public IActionResult PlotTracks([FromBody] PlotTrackRequest request)
         {
@@ -185,6 +185,14 @@ namespace PrintserviceHeadless.Controllers
         )
         {
             int marginLeft = 120, marginBottom = 60, marginTop = 40, marginRight = 40;
+
+            // Reserve space for track headers based on orientation
+            int headerReservedWidth = orientation == 1 ? 100 : 0;
+            int headerReservedHeight = orientation == 0 ? 80 : 0;
+
+            marginLeft += headerReservedWidth;
+            marginTop += headerReservedHeight;
+
             using var bitmap = new SKBitmap(width, height);
             using var canvas = new SKCanvas(bitmap);
             canvas.Clear(SKColors.White);
@@ -206,6 +214,11 @@ namespace PrintserviceHeadless.Controllers
                 for (int trackBand = 0; trackBand < trackCurves.Count; trackBand++)
                 {
                     var (_, curves) = trackCurves[trackBand];
+
+                    // Draw track header FIRST in reserved space
+                    DrawTrackCurveHeader(canvas, marginLeft, marginTop, plotWidth, bandHeight, trackBand, curves, trackNames[trackBand], true, headerReservedWidth);
+
+                    // Then draw curves in remaining space
                     for (int curveIdx = 0; curveIdx < curves.Count; curveIdx++)
                     {
                         var (curveTitle, color, min, max, thickness, data) = curves[curveIdx];
@@ -219,6 +232,7 @@ namespace PrintserviceHeadless.Controllers
                             DrawHorizontalCurve(canvas, marginLeft, marginTop, plotWidth, bandHeight, trackBand, pointsPerTrack, min, max, thickness, color, data);
                         }
                     }
+
                     // Separator
                     if (trackBand < trackCurves.Count - 1)
                     {
@@ -235,6 +249,11 @@ namespace PrintserviceHeadless.Controllers
                 for (int trackBand = 0; trackBand < trackCurves.Count; trackBand++)
                 {
                     var (_, curves) = trackCurves[trackBand];
+
+                    // Draw track header FIRST in reserved space
+                    DrawTrackCurveHeader(canvas, marginLeft, marginTop, bandWidth, plotHeight, trackBand, curves, trackNames[trackBand], false, headerReservedHeight);
+
+                    // Then draw curves in remaining space
                     for (int curveIdx = 0; curveIdx < curves.Count; curveIdx++)
                     {
                         var (curveTitle, color, min, max, thickness, data) = curves[curveIdx];
@@ -248,6 +267,7 @@ namespace PrintserviceHeadless.Controllers
                             DrawVerticalCurve(canvas, marginLeft, marginTop, bandWidth, plotHeight, trackBand, pointsPerTrack, min, max, thickness, color, data);
                         }
                     }
+
                     // Separator
                     if (trackBand < trackCurves.Count - 1)
                     {
@@ -257,6 +277,276 @@ namespace PrintserviceHeadless.Controllers
             }
 
             return SKImage.FromBitmap(bitmap);
+        }
+
+        private void DrawTrackCurveHeader(
+            SKCanvas canvas,
+            int marginLeft,
+            int marginTop,
+            float bandSize,
+            float totalSize,
+            int trackBand,
+            List<(string curveTitle, string color, double min, double max, double thickness, List<double> data)> curves,
+            string trackName,
+            bool isHorizontal,
+            int headerSpace)
+        {
+            if (isHorizontal)
+            {
+                // Draw horizontal text on the left side in reserved header space
+                float trackStartY = marginTop + totalSize * trackBand;
+                float xPosition = marginLeft - headerSpace + 5;
+
+                canvas.Save();
+
+                // Translate to the specific position for THIS track band
+                canvas.Translate(xPosition, trackStartY);
+
+                float availableHeight = totalSize - 10; // Leave some padding
+                float availableWidth = headerSpace - 10;
+                float itemHeight = 12;
+
+                var headerPaint = new SKPaint
+                {
+                    Color = SKColors.Black,
+                    TextSize = 8,
+                    IsAntialias = true,
+                    Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
+                };
+
+                int curveCount = curves.Count;
+
+                // Adaptive rendering strategy for horizontal mode
+                if (curveCount <= 5)
+                {
+                    // Single column - draw all curves
+                    float currentY = 5;
+
+                    // Draw track header
+                    using var headerBoldPaint = new SKPaint
+                    {
+                        Color = SKColors.Black,
+                        TextSize = 9,
+                        IsAntialias = true,
+                        Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+                    };
+
+                    canvas.DrawRect(0, currentY - 7, 6, 6, headerBoldPaint);
+                    currentY += itemHeight;
+
+                    // Draw all curves
+                    foreach (var (curveTitle, color, _, _, _, _) in curves)
+                    {
+                        using var boxPaint = new SKPaint
+                        {
+                            Color = SKColor.Parse(color),
+                            Style = SKPaintStyle.Fill,
+                            IsAntialias = true
+                        };
+                        canvas.DrawRect(0, currentY - 7, 6, 6, boxPaint);
+
+                        string displayText = TruncateLabel(curveTitle, availableWidth - 10, headerPaint);
+                        canvas.DrawText(displayText, 10, currentY, headerPaint);
+                        currentY += itemHeight;
+                    }
+                }
+                else if (curveCount <= 10)
+                {
+                    // Two columns layout
+                    int maxRowsPerColumn = Math.Max(1, (int)(availableHeight / itemHeight));
+                    int numberOfColumns = (int)Math.Ceiling((double)(curveCount + 1) / maxRowsPerColumn); // +1 for header
+                    float columnWidth = availableWidth / Math.Max(numberOfColumns, 1);
+
+                    float currentY = 5;
+                    float currentX = 0;
+                    int itemsInCurrentColumn = 0;
+
+                    // Draw track header
+                    using var headerBoldPaint = new SKPaint
+                    {
+                        Color = SKColors.Black,
+                        TextSize = 9,
+                        IsAntialias = true,
+                        Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+                    };
+
+                    canvas.DrawRect(currentX, currentY - 7, 6, 6, headerBoldPaint);
+                    string trackHeader = TruncateLabel($"Track {trackBand + 1}", columnWidth - 12, headerBoldPaint);
+                    canvas.DrawText(trackHeader, currentX + 10, currentY, headerBoldPaint);
+                    currentY += itemHeight;
+                    itemsInCurrentColumn++;
+
+                    // Draw curves in columns
+                    foreach (var (curveTitle, color, _, _, _, _) in curves)
+                    {
+                        if (itemsInCurrentColumn >= maxRowsPerColumn && currentX + columnWidth < availableWidth)
+                        {
+                            currentX += columnWidth;
+                            currentY = 5;
+                            itemsInCurrentColumn = 0;
+                        }
+
+                        using var boxPaint = new SKPaint
+                        {
+                            Color = SKColor.Parse(color),
+                            Style = SKPaintStyle.Fill,
+                            IsAntialias = true
+                        };
+                        canvas.DrawRect(currentX, currentY - 6, 5, 5, boxPaint);
+
+                        string displayText = TruncateLabel(curveTitle, columnWidth - 12, headerPaint);
+                        canvas.DrawText(displayText, currentX + 8, currentY, headerPaint);
+                        currentY += itemHeight;
+                        itemsInCurrentColumn++;
+                    }
+                }
+                else
+                {
+                    // Summary mode - too many curves
+                    float currentY = 5;
+
+                    using var summaryPaint = new SKPaint
+                    {
+                        Color = SKColors.Black,
+                        TextSize = 9,
+                        IsAntialias = true,
+                        Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Bold)
+                    };
+
+                    string summary = TruncateLabel($"Track {trackBand + 1}: {curves.Count} curves", availableWidth - 5, summaryPaint);
+                    canvas.DrawText(summary, 0, currentY, summaryPaint);
+                    currentY += itemHeight;
+
+                    // Show first 3 curves
+                    int maxToShow = Math.Min(3, curves.Count);
+                    for (int i = 0; i < maxToShow; i++)
+                    {
+                        var (curveTitle, color, _, _, _, _) = curves[i];
+                        using var boxPaint = new SKPaint
+                        {
+                            Color = SKColor.Parse(color),
+                            Style = SKPaintStyle.Fill,
+                            IsAntialias = true
+                        };
+                        canvas.DrawRect(0, currentY - 6, 5, 5, boxPaint);
+
+                        string displayText = TruncateLabel(curveTitle, availableWidth - 10, headerPaint);
+                        canvas.DrawText(displayText, 8, currentY, headerPaint);
+                        currentY += itemHeight;
+                    }
+
+                    if (curves.Count > maxToShow)
+                    {
+                        string moreText = TruncateLabel($"... +{curves.Count - maxToShow} more", availableWidth - 5, headerPaint);
+                        canvas.DrawText(moreText, 0, currentY, headerPaint);
+                    }
+                }
+
+                headerPaint.Dispose();
+                canvas.Restore();
+            }
+            else // Vertical orientation
+            {
+                float currentX = marginLeft + bandSize * trackBand + 5;
+                float currentY = marginTop - headerSpace + 10;
+                float availableWidth = bandSize - 10;
+                float availableHeight = headerSpace - 20;
+
+                var headerPaint = new SKPaint
+                {
+                    Color = SKColors.Black,
+                    TextSize = 9,
+                    IsAntialias = true,
+                    Typeface = SKTypeface.FromFamilyName("Arial", SKFontStyle.Normal)
+                };
+
+                int curveCount = curves.Count;
+                float itemHeight = 12;
+
+                // Adaptive rendering strategy
+                if (curveCount <= 5)
+                {
+                    // Single column - draw all curves
+                    float textY = currentY;
+                    foreach (var (curveTitle, color, _, _, _, _) in curves)
+                    {
+                        using var boxPaint = new SKPaint
+                        {
+                            Color = SKColor.Parse(color),
+                            Style = SKPaintStyle.Fill,
+                            IsAntialias = true
+                        };
+                        canvas.DrawRect(currentX, textY - 7, 6, 6, boxPaint);
+
+                        string displayText = TruncateLabel(curveTitle, availableWidth - 15, headerPaint);
+                        canvas.DrawText(displayText, currentX + 10, textY, headerPaint);
+                        textY += itemHeight;
+                    }
+                }
+                else if (curveCount <= 10)
+                {
+                    // Two columns layout
+                    int maxRowsPerColumn = Math.Max(1, (int)(availableHeight / itemHeight));
+                    int numberOfColumns = (int)Math.Ceiling((double)curveCount / maxRowsPerColumn);
+                    float columnWidth = availableWidth / numberOfColumns;
+
+                    int curveIndex = 0;
+                    for (int col = 0; col < numberOfColumns && curveIndex < curves.Count; col++)
+                    {
+                        float colX = currentX + (col * columnWidth);
+                        float textY = currentY;
+                        int itemsInColumn = Math.Min(maxRowsPerColumn, curves.Count - curveIndex);
+
+                        for (int row = 0; row < itemsInColumn; row++)
+                        {
+                            var (curveTitle, color, _, _, _, _) = curves[curveIndex++];
+                            using var boxPaint = new SKPaint
+                            {
+                                Color = SKColor.Parse(color),
+                                Style = SKPaintStyle.Fill,
+                                IsAntialias = true
+                            };
+                            canvas.DrawRect(colX, textY - 6, 5, 5, boxPaint);
+
+                            string displayText = TruncateLabel(curveTitle, columnWidth - 12, headerPaint);
+                            canvas.DrawText(displayText, colX + 8, textY, headerPaint);
+                            textY += itemHeight;
+                        }
+                    }
+                }
+                else
+                {
+                    // Summary mode - too many curves
+                    string summary = $"Track {trackBand + 1}: {curves.Count} curves";
+                    canvas.DrawText(summary, currentX, currentY, headerPaint);
+
+                    float textY = currentY + itemHeight;
+                    int maxToShow = Math.Min(3, curves.Count);
+
+                    for (int i = 0; i < maxToShow; i++)
+                    {
+                        var (curveTitle, color, _, _, _, _) = curves[i];
+                        using var boxPaint = new SKPaint
+                        {
+                            Color = SKColor.Parse(color),
+                            Style = SKPaintStyle.Fill,
+                            IsAntialias = true
+                        };
+                        canvas.DrawRect(currentX, textY - 6, 5, 5, boxPaint);
+
+                        string displayText = TruncateLabel(curveTitle, availableWidth - 12, headerPaint);
+                        canvas.DrawText(displayText, currentX + 8, textY, headerPaint);
+                        textY += itemHeight;
+                    }
+
+                    if (curves.Count > maxToShow)
+                    {
+                        canvas.DrawText($"... +{curves.Count - maxToShow} more", currentX, textY, headerPaint);
+                    }
+                }
+
+                headerPaint.Dispose();
+            }
         }
 
         private void DrawHorizontalAxesAndGrid(SKCanvas canvas, int marginLeft, int marginTop, int plotWidth, int plotHeight, float bandHeight, int nTracks, int pointsPerTrack, List<string> trackNames, SKPaint labelPaint, SKPaint gridPaint, SKPaint axisPaint)
@@ -516,17 +806,17 @@ namespace PrintserviceHeadless.Controllers
         {
             // Minimum spacing between labels (1.5x font size for readability)
             float minSpacing = fontSize * 1.5f;
-            
+
             // Maximum number of labels that can fit
             int maxLabels = (int)(availableSpace / minSpacing);
             maxLabels = Math.Max(maxLabels, 2); // At least 2 labels (start and end)
-            
+
             // Calculate raw increment
             int rawIncrement = maxValue / (maxLabels - 1);
-            
+
             // Round to a "nice" number (10, 20, 50, 100, 200, 500, 1000, etc.)
             int[] niceNumbers = { 1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 2500, 5000, 10000 };
-            
+
             int increment = niceNumbers[0];
             foreach (int nice in niceNumbers)
             {
@@ -537,7 +827,7 @@ namespace PrintserviceHeadless.Controllers
                 }
                 increment = nice;
             }
-            
+
             // Ensure at least one increment
             return Math.Max(increment, 1);
         }
