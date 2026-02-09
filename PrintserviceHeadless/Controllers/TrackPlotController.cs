@@ -130,7 +130,7 @@ namespace PrintserviceHeadless.Controllers
             int orientation = config.TryGetProperty("orientation", out var orientElem) ? orientElem.GetInt32() : 1; // default to horizontal
 
             int width = 1200, height = 800;
-            int pointsPerTrack = 100;
+            int pointsPerTrack = 200;
 
             var (trackNames, trackCurves) = ParseTracks(tracks, pointsPerTrack);
 
@@ -165,7 +165,7 @@ namespace PrintserviceHeadless.Controllers
                         var curveTitle = curve.TryGetProperty("title", out var ct) ? ct.GetString() : "Curve";
                         var color = curve.TryGetProperty("colour", out var col) ? col.GetString() : "#000000";
                         var min = curve.TryGetProperty("manualScaleMin", out var cmin) ? cmin.GetDouble() : 0;
-                        var max = curve.TryGetProperty("manualScaleMax", out var cmax) ? cmax.GetDouble() : 1000;
+                        var max = curve.TryGetProperty("manualScaleMax", out var cmax) ? cmax.GetDouble() : 100;
                         var thickness = curve.TryGetProperty("lineThickness", out var th) ? th.GetDouble() : 2;
 
                         var data = GenerateSampleData(min, max, pointsPerTrack);
