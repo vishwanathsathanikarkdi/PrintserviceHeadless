@@ -68,10 +68,10 @@ namespace PrintserviceHeadless.Controllers
             plt.Axes.Left.TickLabelStyle.ForeColor = ScottPlot.Colors.Black;
 
             // Increase left margin to accommodate multi-line labels and prevent cutoff
-            plt.Layout.Fixed(new ScottPlot.PixelPadding(220, 60, 60, 100));
+            plt.Layout.Fixed(new ScottPlot.PixelPadding(220, 60, 60, 150));
 
             // Set X axis range with uniform track heights
-            plt.Axes.SetLimits(0, pointsPerTrack, -0.5 * trackHeight, (nTracks - 0.5) * trackHeight);
+            //plt.Axes.SetLimits(0, pointsPerTrack, -0.5 * trackHeight, (nTracks - 0.5) * trackHeight);
 
             // Remove automatic axis margins that create unwanted padding
             plt.Axes.Margins(0, 0);
@@ -80,7 +80,7 @@ namespace PrintserviceHeadless.Controllers
             foreach (var (trackName, curves) in trackCurves)
             {
                 double trackBaseY = trackBand * trackHeight;
-                bool isFirstCurve = true;
+                var isFirstCurve = true;
 
                 foreach (var (curveTitle, color, min, max, thickness, data) in curves)
                 {
@@ -132,6 +132,7 @@ namespace PrintserviceHeadless.Controllers
             }
 
             // Don't show legend
+            plt.ShowLegend(Edge.Top);
             plt.HideGrid();
             plt.Grid.MajorLineColor = ScottPlot.Color.FromHex("#D3D3D3");
             plt.ShowGrid();
@@ -149,7 +150,6 @@ namespace PrintserviceHeadless.Controllers
                 }
             }
 
-            plt.ShowLegend(Edge.Top);
         }
 
         private void DrawScotPlotVertical(
@@ -188,7 +188,7 @@ namespace PrintserviceHeadless.Controllers
             foreach (var (trackName, curves) in trackCurves)
             {
                 double trackBaseX = trackBand * trackWidth;
-                bool isFirstCurve = true;
+                var isFirstCurve = true;
 
                 foreach (var (curveTitle, color, min, max, thickness, data) in curves)
                 {
@@ -361,8 +361,38 @@ namespace PrintserviceHeadless.Controllers
         {
             var data = new List<double>();
             var rand = new Random();
+            
+            // Generate time series data with various patterns
+            double range = max - min;
+            double midPoint = min + (range / 2);
+            
             for (int i = 0; i < count; i++)
-                data.Add(rand.NextDouble() * (max - min) + min);
+            {
+                double t = (double)i / count; // Normalized time [0, 1]
+                double value = 0;
+                
+                // Combine multiple patterns to create realistic time series
+                // 1. Trend component (gradual increase/decrease)
+                double trend = (rand.NextDouble() - 0.5) * range * 0.3 * t;
+                
+                // 2. Seasonal/cyclic component (sine wave)
+                double seasonal = Math.Sin(2 * Math.PI * t * (2 + rand.Next(0, 3))) * range * 0.25;
+                
+                // 3. Secondary cycle (different frequency)
+                double secondaryCycle = Math.Cos(2 * Math.PI * t * (4 + rand.Next(0, 2))) * range * 0.15;
+                
+                // 4. Random noise
+                double noise = (rand.NextDouble() - 0.5) * range * 0.1;
+                
+                // Combine all components
+                value = midPoint + trend + seasonal + secondaryCycle + noise;
+                
+                // Clamp to min/max range
+                value = Math.Max(min, Math.Min(max, value));
+                
+                data.Add(value);
+            }
+            
             return data;
         }
     }
