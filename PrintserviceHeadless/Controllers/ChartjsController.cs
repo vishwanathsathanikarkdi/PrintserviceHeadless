@@ -1,4 +1,9 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
+using Microsoft.AspNetCore.Mvc.Rendering;
+using Microsoft.AspNetCore.Mvc.ViewEngines;
+using Microsoft.AspNetCore.Mvc.ViewFeatures;
+using PrintserviceHeadless.Models;
 using System.Text;
 using System.Text.Json;
 
@@ -8,8 +13,25 @@ namespace PrintserviceHeadless.Controllers
     [Route("[controller]")]
     public class ChartJsController : ControllerBase
     {
+        private readonly ICompositeViewEngine _viewEngine;
+        private readonly ITempDataProvider _tempDataProvider;
+        private readonly IWebHostEnvironment _webHostEnvironment;
+        private static readonly SemaphoreSlim _cacheLock = new SemaphoreSlim(1, 1);
+        private static string? _cachedChartJsScript;
+        private static string? _cachedAnnotationScript;
+
+        public ChartJsController(
+            ICompositeViewEngine viewEngine, 
+            ITempDataProvider tempDataProvider,
+            IWebHostEnvironment webHostEnvironment)
+        {
+            _viewEngine = viewEngine;
+            _tempDataProvider = tempDataProvider;
+            _webHostEnvironment = webHostEnvironment;
+        }
+
         [HttpPost("plot-chartjs")]
-        public IActionResult PlotTracksChartJs([FromBody] PlotTrackRequest request)
+        public async Task<IActionResult> PlotTracksChartJs([FromBody] PlotTrackRequest request)
         {
             if (string.IsNullOrWhiteSpace(request.WidgetsAsJsonString))
                 return BadRequest("widgetsAsJsonString is required.");
@@ -17,540 +39,138 @@ namespace PrintserviceHeadless.Controllers
             var widgets = JsonDocument.Parse(request.WidgetsAsJsonString).RootElement;
             var config = widgets[0].GetProperty("configuration").GetProperty("widgetConfiguration");
             var tracks = config.GetProperty("tracks");
-            int orientation = config.TryGetProperty("orientation", out var orientElem) ? orientElem.GetInt32() : 1; // default to horizontal
+            int orientation = config.TryGetProperty("orientation", out var orientElem) ? orientElem.GetInt32() : 1;
 
             int pointsPerTrack = 100;
 
             var (trackNames, trackCurves) = ParseTracks(tracks, pointsPerTrack);
 
-            string html = orientation == 1
-                ? GenerateHorizontalChartHtml(trackNames, trackCurves)
-                : GenerateVerticalChartHtml(trackNames, trackCurves);
+            var model = new ChartViewModel
+            {
+                TrackNames = trackNames,
+                TrackCurves = trackCurves,
+                Orientation = orientation,
+                IsHorizontal = orientation == 1
+            };
 
-            var htmlBytes = Encoding.UTF8.GetBytes(html);
-            return File(htmlBytes, "text/html", "tracks-chart.html");
+            // Render view to HTML string
+            var viewName = orientation == 1 ? "HorizontalChart" : "VerticalChart";
+            string htmlContent = await RenderViewToStringAsync(viewName, model);
+
+            // Embed local JavaScript files
+            htmlContent = await EmbedLocalScriptsAsync(htmlContent);
+
+            // Convert to stream and return as downloadable HTML file
+            var stream = new MemoryStream(Encoding.UTF8.GetBytes(htmlContent));
+            stream.Position = 0;
+
+            return File(stream, "text/html", "tracks-chart.html");
         }
 
-        private string GenerateHorizontalChartHtml(
-            List<string> trackNames,
-            List<(string trackName, List<(string curveTitle, string color, double min, double max, double thickness, List<double> data)>)> trackCurves)
+        private async Task<string> EmbedLocalScriptsAsync(string htmlContent)
         {
-            var datasetsJson = new StringBuilder();
-            int trackIndex = 0;
+            // Get scripts from local files (cached)
+            var chartJsScript = await GetChartJsScriptAsync();
+            var annotationScript = await GetAnnotationScriptAsync();
 
-            foreach (var (trackName, curves) in trackCurves)
+            // Replace CDN script tags with inline scripts
+            htmlContent = htmlContent.Replace(
+                "<script src=\"https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js\"></script>",
+                $"<script>{chartJsScript}</script>"
+            );
+
+            htmlContent = htmlContent.Replace(
+                "<script src=\"https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js\"></script>",
+                $"<script>{annotationScript}</script>"
+            );
+
+            return htmlContent;
+        }
+
+        private async Task<string> GetChartJsScriptAsync()
+        {
+            if (_cachedChartJsScript != null)
+                return _cachedChartJsScript;
+
+            await _cacheLock.WaitAsync();
+            try
             {
-                bool isFirstCurve = true;
+                if (_cachedChartJsScript != null)
+                    return _cachedChartJsScript;
 
-                foreach (var (curveTitle, color, min, max, thickness, data) in curves)
+                // Path to the local Chart.js file in Views/libs folder
+                var scriptPath = Path.Combine(_webHostEnvironment.ContentRootPath, "Views", "libs", "chart.umd.min.js");
+                
+                if (!System.IO.File.Exists(scriptPath))
                 {
-                    // Normalize data to fit within track band (each track gets a unit height of 1.0)
-                    var normalizedData = data.Select((d, i) =>
-                    {
-                        double normalized = (d - min) / (max - min + 1e-9);
-                        normalized = Math.Max(0.0, Math.Min(1.0, normalized));
-                        // Map to track band: trackIndex to trackIndex+1, with 0.1 and 0.9 margins
-                        double yValue = trackIndex + 0.1 + (normalized * 0.8);
-                        return $"{{x: {i}, y: {yValue:F4}}}";
-                    });
-
-                    var dataPoints = string.Join(",", normalizedData);
-
-                    // Add fill for the first curve in each track
-                    string fillConfig = isFirstCurve ? "true" : "false";
-                    string fillColor = isFirstCurve ? $"'{color}33'" : "false";
-
-                    datasetsJson.AppendLine($@"
-        {{
-            label: '{trackName} - {curveTitle}',
-            data: [{dataPoints}],
-            borderColor: '{color}',
-            backgroundColor: {fillColor},
-            borderWidth: {thickness},
-            fill: {{
-                target: {trackIndex + 0.1:F1},
-                above: '{color}33'
-            }},
-            tension: 0.1,
-            pointRadius: 0,
-            yAxisID: 'y'
-        }},");
-
-                    isFirstCurve = false;
+                    throw new FileNotFoundException($"Chart.js file not found at: {scriptPath}");
                 }
 
-                trackIndex++;
+                _cachedChartJsScript = await System.IO.File.ReadAllTextAsync(scriptPath);
+                return _cachedChartJsScript;
             }
-
-            // Generate Y-axis tick labels and positions
-            var yTickPositions = string.Join(", ", Enumerable.Range(0, trackCurves.Count).Select(i => $"{i + 0.5:F1}"));
-            var yTickLabels = string.Join(", ", trackNames.Select(name => $"'{name}'"));
-
-            var html = $@"
-<!DOCTYPE html>
-<html lang=""en"">
-<head>
-    <meta charset=""UTF-8"">
-    <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
-    <title>Tracks Chart (Horizontal)</title>
-    <script src=""https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js""></script>
-    <script src=""https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js""></script>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }}
-        .chart-container {{
-            position: relative;
-            width: 1200px;
-            height: 800px;
-            background-color: white;
-            padding: 20px;
-            margin: 0 auto;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            text-align: center;
-            color: #333;
-        }}
-    </style>
-</head>
-<body>
-    <h1>Tracks (Grouped) - Horizontal</h1>
-    <div class=""chart-container"">
-        <canvas id=""tracksChart""></canvas>
-    </div>
-
-    <script>
-        const ctx = document.getElementById('tracksChart').getContext('2d');
-        
-        const chart = new Chart(ctx, {{
-            type: 'line',
-            data: {{
-                datasets: [
-                    {datasetsJson}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {{
-                    x: {{
-                        type: 'linear',
-                        position: 'bottom',
-                        title: {{
-                            display: true,
-                            text: 'Index',
-                            font: {{
-                                size: 14,
-                                weight: 'bold'
-                            }}
-                        }},
-                        grid: {{
-                            color: '#D3D3D3'
-                        }}
-                    }},
-                    y: {{
-                        type: 'linear',
-                        position: 'left',
-                        min: -0.5,
-                        max: {trackCurves.Count - 0.5},
-                        ticks: {{
-                            values: [{yTickPositions}],
-                            callback: function(value, index, values) {{
-                                const labels = [{yTickLabels}];
-                                const tickIndex = Math.round(value - 0.5);
-                                if (tickIndex >= 0 && tickIndex < labels.length && Math.abs(value - (tickIndex + 0.5)) < 0.01) {{
-                                    return labels[tickIndex];
-                                }}
-                                return '';
-                            }},
-                            font: {{
-                                size: 12,
-                                weight: 'bold'
-                            }}
-                        }},
-                        title: {{
-                            display: true,
-                            text: 'Tracks',
-                            font: {{
-                                size: 14,
-                                weight: 'bold'
-                            }}
-                        }},
-                        grid: {{
-                            color: function(context) {{
-                                // Draw separator lines between tracks
-                                const value = context.tick.value;
-                                for (let i = 0; i < {trackCurves.Count - 1}; i++) {{
-                                    if (Math.abs(value - (i + 0.5)) < 0.01) {{
-                                        return 'rgba(128, 128, 128, 0.5)';
-                                    }}
-                                }}
-                                return '#E5E5E5';
-                            }},
-                            lineWidth: function(context) {{
-                                const value = context.tick.value;
-                                for (let i = 0; i < {trackCurves.Count - 1}; i++) {{
-                                    if (Math.abs(value - (i + 0.5)) < 0.01) {{
-                                        return 1;
-                                    }}
-                                }}
-                                return 1;
-                            }}
-                        }}
-                    }}
-                }},
-                plugins: {{
-                    legend: {{
-                        display: true,
-                        position: 'top',
-                        labels: {{
-                            boxWidth: 15,
-                            padding: 8,
-                            font: {{
-                                size: 10
-                            }},
-                            usePointStyle: false
-                        }}
-                    }},
-                    title: {{
-                        display: true,
-                        text: 'Tracks (Grouped)',
-                        font: {{
-                            size: 18,
-                            weight: 'bold'
-                        }},
-                        padding: {{
-                            top: 10,
-                            bottom: 20
-                        }}
-                    }},
-                    tooltip: {{
-                        mode: 'index',
-                        intersect: false,
-                        callbacks: {{
-                            title: function(context) {{
-                                return 'Index: ' + context[0].parsed.x;
-                            }},
-                            label: function(context) {{
-                                return context.dataset.label + ': ' + context.parsed.y.toFixed(4);
-                            }}
-                        }}
-                    }},
-                    annotation: {{
-                        annotations: {GenerateHorizontalSeparators(trackCurves.Count)}
-                    }}
-                }},
-                interaction: {{
-                    mode: 'nearest',
-                    axis: 'x',
-                    intersect: false
-                }}
-            }}
-        }});
-    </script>
-</body>
-</html>";
-
-            return html;
+            finally
+            {
+                _cacheLock.Release();
+            }
         }
 
-        private string GenerateHorizontalSeparators(int trackCount)
+        private async Task<string> GetAnnotationScriptAsync()
         {
-            var separators = new StringBuilder();
-            separators.AppendLine("{");
+            if (_cachedAnnotationScript != null)
+                return _cachedAnnotationScript;
 
-            for (int i = 0; i < trackCount - 1; i++)
+            await _cacheLock.WaitAsync();
+            try
             {
-                double separatorY = i + 0.5;
-                separators.AppendLine($@"
-                    separator{i}: {{
-                        type: 'line',
-                        yMin: {separatorY:F1},
-                        yMax: {separatorY:F1},
-                        borderColor: 'rgba(128, 128, 128, 0.5)',
-                        borderWidth: 1,
-                        borderDash: [5, 5]
-                    }}{(i < trackCount - 2 ? "," : "")}");
-            }
+                if (_cachedAnnotationScript != null)
+                    return _cachedAnnotationScript;
 
-            separators.AppendLine("}");
-            return separators.ToString();
-        }
-
-        private string GenerateVerticalSeparators(int trackCount)
-        {
-            var separators = new StringBuilder();
-            separators.AppendLine("{");
-
-            for (int i = 0; i < trackCount - 1; i++)
-            {
-                double separatorX = i + 0.5;
-                separators.AppendLine($@"
-                    separator{i}: {{
-                        type: 'line',
-                        xMin: {separatorX:F1},
-                        xMax: {separatorX:F1},
-                        borderColor: 'rgba(128, 128, 128, 0.5)',
-                        borderWidth: 1,
-                        borderDash: [5, 5]
-                    }}{(i < trackCount - 2 ? "," : "")}");
-            }
-
-            // Add markers
-            separators.AppendLine(@",
-                    line1: {
-                        type: 'line',
-                        yMin: 80,
-                        yMax: 80,
-                        borderColor: 'rgb(255, 0, 0)',
-                        borderWidth: 2,
-                        borderDash: [5, 5],
-                        label: {
-                            display: true,
-                            content: 'Marker 1',
-                            position: 'start',
-                            backgroundColor: 'rgba(255, 0, 0, 0.8)',
-                            color: 'white',
-                            font: {
-                                size: 12,
-                                weight: 'bold'
-                            }
-                        }
-                    },
-                    line2: {
-                        type: 'line',
-                        yMin: 90,
-                        yMax: 90,
-                        borderColor: 'rgb(0, 0, 255)',
-                        borderWidth: 2,
-                        borderDash: [5, 5],
-                        label: {
-                            display: true,
-                            content: 'Marker 2',
-                            position: 'start',
-                            backgroundColor: 'rgba(0, 0, 255, 0.8)',
-                            color: 'white',
-                            font: {
-                                size: 12,
-                                weight: 'bold'
-                            }
-                        }
-                    }");
-
-            separators.AppendLine("}");
-            return separators.ToString();
-        }
-
-        private string GenerateVerticalChartHtml(
-            List<string> trackNames,
-            List<(string trackName, List<(string curveTitle, string color, double min, double max, double thickness, List<double> data)>)> trackCurves)
-        {
-            var datasetsJson = new StringBuilder();
-            int trackIndex = 0;
-
-            foreach (var (trackName, curves) in trackCurves)
-            {
-                bool isFirstCurve = true;
-
-                foreach (var (curveTitle, color, min, max, thickness, data) in curves)
+                // Path to the local annotation plugin file in Views/libs folder
+                var scriptPath = Path.Combine(_webHostEnvironment.ContentRootPath, "Views", "libs", "chartjs-plugin-annotation.min.js");
+                
+                if (!System.IO.File.Exists(scriptPath))
                 {
-                    // Normalize data to fit within track band
-                    var normalizedData = data.Select((d, i) =>
-                    {
-                        double normalized = (d - min) / (max - min + 1e-9);
-                        normalized = Math.Max(0.0, Math.Min(1.0, normalized));
-                        double xValue = trackIndex + 0.1 + (normalized * 0.8);
-                        return $"{{x: {xValue:F4}, y: {i}}}";
-                    });
-
-                    var dataPoints = string.Join(",", normalizedData);
-
-                    // Add fill for the first curve in each track
-                    string fillColor = isFirstCurve ? $"'{color}33'" : "false";
-
-                    datasetsJson.AppendLine($@"
-        {{
-            label: '{trackName} - {curveTitle}',
-            data: [{dataPoints}],
-            borderColor: '{color}',
-            backgroundColor: {fillColor},
-            borderWidth: {thickness},
-            fill: {{
-                target: {trackIndex + 0.1:F1},
-                below: '{color}33'
-            }},
-            tension: 0.1,
-            pointRadius: 0,
-            xAxisID: 'x'
-        }},");
-
-                    isFirstCurve = false;
+                    throw new FileNotFoundException($"Chart.js annotation plugin file not found at: {scriptPath}");
                 }
 
-                trackIndex++;
+                _cachedAnnotationScript = await System.IO.File.ReadAllTextAsync(scriptPath);
+                return _cachedAnnotationScript;
+            }
+            finally
+            {
+                _cacheLock.Release();
+            }
+        }
+
+        private async Task<string> RenderViewToStringAsync(string viewName, object model)
+        {
+            var actionContext = new ActionContext(HttpContext, RouteData, ControllerContext.ActionDescriptor);
+
+            using var sw = new StringWriter();
+            var viewResult = _viewEngine.FindView(actionContext, viewName, false);
+
+            if (viewResult.View == null)
+            {
+                throw new ArgumentNullException($"{viewName} does not match any available view");
             }
 
-            // Generate X-axis tick labels and positions
-            var xTickPositions = string.Join(", ", Enumerable.Range(0, trackCurves.Count).Select(i => $"{i + 0.5:F1}"));
-            var xTickLabels = string.Join(", ", trackNames.Select(name => $"'{name}'"));
+            var viewDictionary = new ViewDataDictionary(new EmptyModelMetadataProvider(), new ModelStateDictionary())
+            {
+                Model = model
+            };
 
-            var html = $@"
-<!DOCTYPE html>
-<html lang=""en"">
-<head>
-    <meta charset=""UTF-8"">
-    <meta name=""viewport"" content=""width=device-width, initial-scale=1.0"">
-    <title>Tracks Chart (Vertical)</title>
-    <script src=""https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js""></script>
-    <script src=""https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js""></script>
-    <style>
-        body {{
-            font-family: Arial, sans-serif;
-            margin: 20px;
-            background-color: #f5f5f5;
-        }}
-        .chart-container {{
-            position: relative;
-            width: 1200px;
-            height: 800px;
-            background-color: white;
-            padding: 20px;
-            margin: 0 auto;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }}
-        h1 {{
-            text-align: center;
-            color: #333;
-        }}
-    </style>
-</head>
-<body>
-    <h1>Tracks (Grouped) - Vertical</h1>
-    <div class=""chart-container"">
-        <canvas id=""tracksChart""></canvas>
-    </div>
+            var viewContext = new ViewContext(
+                actionContext,
+                viewResult.View,
+                viewDictionary,
+                new TempDataDictionary(actionContext.HttpContext, _tempDataProvider),
+                sw,
+                new HtmlHelperOptions()
+            );
 
-    <script>
-        const ctx = document.getElementById('tracksChart').getContext('2d');
-        
-        const chart = new Chart(ctx, {{
-            type: 'line',
-            data: {{
-                datasets: [
-                    {datasetsJson}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                maintainAspectRatio: false,
-                scales: {{
-                    x: {{
-                        type: 'linear',
-                        position: 'bottom',
-                        min: -0.5,
-                        max: {trackCurves.Count - 0.5},
-                        ticks: {{
-                            values: [{xTickPositions}],
-                            callback: function(value, index, values) {{
-                                const labels = [{xTickLabels}];
-                                const tickIndex = Math.round(value - 0.5);
-                                if (tickIndex >= 0 && tickIndex < labels.length && Math.abs(value - (tickIndex + 0.5)) < 0.01) {{
-                                    return labels[tickIndex];
-                                }}
-                                return '';
-                            }},
-                            font: {{
-                                size: 12,
-                                weight: 'bold'
-                            }}
-                        }},
-                        title: {{
-                            display: true,
-                            text: 'Tracks',
-                            font: {{
-                                size: 14,
-                                weight: 'bold'
-                            }}
-                        }},
-                        grid: {{
-                            color: function(context) {{
-                                const value = context.tick.value;
-                                for (let i = 0; i < {trackCurves.Count - 1}; i++) {{
-                                    if (Math.abs(value - (i + 0.5)) < 0.01) {{
-                                        return 'rgba(128, 128, 128, 0.5)';
-                                    }}
-                                }}
-                                return '#E5E5E5';
-                            }}
-                        }}
-                    }},
-                    y: {{
-                        type: 'linear',
-                        reverse: false,
-                        title: {{
-                            display: true,
-                            text: 'Index',
-                            font: {{
-                                size: 14,
-                                weight: 'bold'
-                            }}
-                        }},
-                        grid: {{
-                            color: '#D3D3D3'
-                        }}
-                    }}
-                }},
-                plugins: {{
-                    legend: {{
-                        display: true,
-                        position: 'top',
-                        labels: {{
-                            boxWidth: 15,
-                            padding: 8,
-                            font: {{
-                                size: 10
-                            }}
-                        }}
-                    }},
-                    title: {{
-                        display: true,
-                        text: 'Tracks (Grouped)',
-                        font: {{
-                            size: 18,
-                            weight: 'bold'
-                        }}
-                    }},
-                    tooltip: {{
-                        mode: 'index',
-                        intersect: false,
-                        callbacks: {{
-                            title: function(context) {{
-                                return 'Index: ' + context[0].parsed.y;
-                            }},
-                            label: function(context) {{
-                                return context.dataset.label + ': ' + context.parsed.x.toFixed(4);
-                            }}
-                        }}
-                    }},
-                    annotation: {{
-                        annotations: {GenerateVerticalSeparators(trackCurves.Count)}
-                    }}
-                }},
-                interaction: {{
-                    mode: 'nearest',
-                    axis: 'y',
-                    intersect: false
-                }}
-            }}
-        }});
-    </script>
-</body>
-</html>";
-
-            return html;
+            await viewResult.View.RenderAsync(viewContext);
+            return sw.ToString();
         }
 
         private (List<string> trackNames, List<(string trackName, List<(string curveTitle, string color, double min, double max, double thickness, List<double> data)>)>) ParseTracks(JsonElement tracks, int pointsPerTrack)

@@ -1,0 +1,233 @@
+@using System.Linq
+@using System.Collections.Generic
+@using PrintserviceHeadless.Models
+@model ChartViewModel
+@{
+    Layout = null;
+}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tracks Chart (Horizontal)</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .chart-container {
+            position: relative;
+            width: 1200px;
+            height: 800px;
+            background-color: white;
+            padding: 20px;
+            margin: 0 auto;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+
+        h1 {
+            text-align: center;
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <h1>Tracks (Grouped) - Horizontal</h1>
+    <div class="chart-container">
+        <canvas id="tracksChart"></canvas>
+    </div>
+
+    <script>
+        const ctx = document.getElementById('tracksChart').getContext('2d');
+
+        // Build datasets from model data
+        const datasets = [
+            @{
+                    int trackIndex = 0;
+                    foreach (var (trackName, curves) in Model.TrackCurves)
+                    {
+                            bool isFirstCurve = true;
+                            foreach (var (curveTitle, color, min, max, thickness, data) in curves)
+                            {
+                                    var normalizedData = new List<string>();
+                                    for (int i = 0; i < data.Count; i++)
+                                    {
+                                            double normalized = (data[i] - min) / (max - min + 1e-9);
+                                            normalized = Math.Max(0.0, Math.Min(1.0, normalized));
+                                            double yValue = trackIndex + 0.1 + (normalized * 0.8);
+                                            normalizedData.Add($"{{x: {i}, y: {yValue.ToString("F4", System.Globalization.CultureInfo.InvariantCulture)}}}");
+                                    }
+
+                                    string fillColor = isFirstCurve ? $"'{color}33'" : "false";
+
+                                            <text>
+                        {
+                            label: '@Html.Raw(trackName) - @Html.Raw(curveTitle)',
+                            data: [@Html.Raw(string.Join(",", normalizedData))],
+                            borderColor: '@Html.Raw(color)',
+                            backgroundColor: @Html.Raw(fillColor),
+                            borderWidth: @thickness.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                            fill: {
+                                target: @((trackIndex + 0.1).ToString("F1", System.Globalization.CultureInfo.InvariantCulture)),
+                                above: '@Html.Raw(color)33'
+                            },
+                            tension: 0.1,
+                            pointRadius: 0,
+                            yAxisID: 'y'
+                        },</text>
+
+                                    isFirstCurve = false;
+                            }
+                            trackIndex++;
+                    }
+            }
+        ];
+
+        const trackNames = [@Html.Raw(string.Join(", ", Model.TrackNames.Select(name => $"'{name}'")))];
+        const trackCount = @Model.TrackCurves.Count;
+
+        const chart = new Chart(ctx, {
+            type: 'line',
+            data: {
+                datasets: datasets
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                scales: {
+                    x: {
+                        type: 'linear',
+                        position: 'bottom',
+                        title: {
+                            display: true,
+                            text: 'Index',
+                            font: {
+                                size: 14,
+                                weight: 'bold'
+                            }
+                        },
+                        grid: {
+                            color: '#D3D3D3'
+                        }
+                    },
+                    y: {
+                        type: 'linear',
+                        position: 'left',
+                        min: -0.5,
+                        max: trackCount - 0.5,
+                        ticks: {
+                            values: [@Html.Raw(string.Join(", ", Enumerable.Range(0, Model.TrackCurves.Count).Select(i => (i + 0.5).ToString("F1", System.Globalization.CultureInfo.InvariantCulture))))],
+                            callback: function(value, index, values) {
+                                const tickIndex = Math.round(value - 0.5);
+                                if (tickIndex >= 0 && tickIndex < trackNames.length && Math.abs(value - (tickIndex + 0.5)) < 0.01) {
+                                    return trackNames[tickIndex];
+                                }
+                                return '';
+                            },
+                            font: {
+                                size: 12,
+                                weight: 'bold'
+                            }
+                        },
+                        title: {
+                            display: true,
+                            text: 'Tracks',
+                            font: {
+                                size: 14,
+                                weight: 'bold'
+                            }
+                        },
+                        grid: {
+                            color: function(context) {
+                                const value = context.tick.value;
+                                for (let i = 0; i < trackCount - 1; i++) {
+                                    if (Math.abs(value - (i + 0.5)) < 0.01) {
+                                        return 'rgba(128, 128, 128, 0.5)';
+                                    }
+                                }
+                                return '#E5E5E5';
+                            },
+                            lineWidth: function(context) {
+                                const value = context.tick.value;
+                                for (let i = 0; i < trackCount - 1; i++) {
+                                    if (Math.abs(value - (i + 0.5)) < 0.01) {
+                                        return 1;
+                                    }
+                                }
+                                return 1;
+                            }
+                        }
+                    }
+                },
+                plugins: {
+                    legend: {
+                        display: true,
+                        position: 'top',
+                        labels: {
+                            boxWidth: 15,
+                            padding: 8,
+                            font: {
+                                size: 10
+                            },
+                            usePointStyle: false
+                        }
+                    },
+                    title: {
+                        display: true,
+                        text: 'Tracks (Grouped)',
+                        font: {
+                            size: 18,
+                            weight: 'bold'
+                        },
+                        padding: {
+                            top: 10,
+                            bottom: 20
+                        }
+                    },
+                    tooltip: {
+                        mode: 'index',
+                        intersect: false,
+                        callbacks: {
+                            title: function(context) {
+                                return 'Index: ' + context[0].parsed.x;
+                            },
+                            label: function(context) {
+                                return context.dataset.label + ': ' + context.parsed.y.toFixed(4);
+                            }
+                        }
+                    },
+                    annotation: {
+                        annotations: {
+                            @{
+                                    for (int i = 0; i < Model.TrackCurves.Count - 1; i++)
+                                    {
+                                            double separatorY = i + 0.5;
+                                            <text>
+                                    separator@(i): {
+                                        type: 'line',
+                                        yMin: @separatorY.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),
+                                        yMax: @separatorY.ToString("F1", System.Globalization.CultureInfo.InvariantCulture),
+                                        borderColor: 'rgba(128, 128, 128, 0.5)',
+                                        borderWidth: 1,
+                                        borderDash: [5, 5]
+                                    }@(i < Model.TrackCurves.Count - 2 ? "," : "")</text>
+                                    }
+                            }
+                        }
+                    }
+                },
+                interaction: {
+                    mode: 'nearest',
+                    axis: 'x',
+                    intersect: false
+                }
+            }
+        });
+    </script>
+</body>
+</html>
