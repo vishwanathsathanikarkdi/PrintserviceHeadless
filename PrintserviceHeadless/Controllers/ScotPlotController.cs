@@ -42,6 +42,40 @@ namespace PrintserviceHeadless.Controllers
             return File(imageBytes, "image/png");
         }
 
+        [HttpPost("plot-scotplot-multiaxis")]
+        public IActionResult PlotTracksMultiaxisScotPlot([FromBody] PlotTrackRequest request)
+        {
+            if (string.IsNullOrWhiteSpace(request.WidgetsAsJsonString))
+                return BadRequest("widgetsAsJsonString is required.");
+
+            var widgets = JsonDocument.Parse(request.WidgetsAsJsonString).RootElement;
+            var config = widgets[0].GetProperty("configuration").GetProperty("widgetConfiguration");
+            var tracks = config.GetProperty("tracks");
+            int orientation = config.TryGetProperty("orientation", out var orientElem) ? orientElem.GetInt32() : 1; // default to horizontal
+
+            int width = 1200, height = 800;
+            int pointsPerTrack = 100;
+
+            var (trackNames, trackCurves) = ParseTracks(tracks, pointsPerTrack);
+
+            var plt = new ScottPlot.Plot();
+            plt.Title("Tracks (Multi-Axis)");
+            plt.XLabel("Index");
+            plt.YLabel("Track");
+
+            if (orientation == 1) // Horizontal
+            {
+                DrawScotPlotHorizontalMultiAxis(plt, trackNames, trackCurves, pointsPerTrack);
+            }
+            else // Vertical
+            {
+                DrawScotPlotVerticalMultiAxis(plt, trackNames, trackCurves, pointsPerTrack);
+            }
+
+            var imageBytes = plt.GetImageBytes(width, height, ScottPlot.ImageFormat.Png);
+            return File(imageBytes, "image/png");
+        }
+
         private void DrawScotPlotHorizontal(
             ScottPlot.Plot plt,
             List<string> trackNames,
@@ -313,6 +347,202 @@ namespace PrintserviceHeadless.Controllers
 
             plt.ShowLegend(Edge.Top);
             // Don't show legend
+            plt.HideGrid();
+            plt.Grid.MajorLineColor = ScottPlot.Color.FromHex("#D3D3D3");
+            plt.ShowGrid();
+        }
+
+        private void DrawScotPlotHorizontalMultiAxis(
+            ScottPlot.Plot plt,
+            List<string> trackNames,
+            List<(string trackName, List<(string curveTitle, string color, double min, double max, double thickness, List<double> data)>)> trackCurves,
+            int pointsPerTrack)
+        {
+            int nTracks = trackNames.Count;
+            const double trackHeight = 1.0; // Uniform track height
+
+            // Build custom tick labels
+            var customLabels = new List<string>();
+            foreach (var (trackName, curves) in trackCurves)
+            {
+                customLabels.Add(trackName);
+            }
+
+            // Set Y axis to categorical with uniform spacing
+            double[] yPositions = Enumerable.Range(0, nTracks).Select(i => i * trackHeight).ToArray();
+            plt.Axes.Left.TickGenerator = new ScottPlot.TickGenerators.NumericManual(yPositions, customLabels.ToArray());
+            plt.Axes.Left.TickLabelStyle.ForeColor = ScottPlot.Colors.Black;
+
+            // Increase left margin to accommodate scale labels
+            plt.Layout.Fixed(new ScottPlot.PixelPadding(280, 60, 60, 150));
+            plt.Axes.Margins(0, 0);
+
+            int trackBand = 0;
+            foreach (var (trackName, curves) in trackCurves)
+            {
+                double trackBaseY = trackBand * trackHeight;
+                bool isFirstCurve = true;
+
+                foreach (var (curveTitle, color, min, max, thickness, data) in curves)
+                {
+                    // Each curve uses the FULL track height with its own scale
+                    var xData = Enumerable.Range(0, data.Count).Select(i => (double)i).ToArray();
+                    var yData = data.Select(d =>
+                    {
+                        double normalizedValue = (d - min) / (max - min + 1e-9);
+                        normalizedValue = Math.Max(0.0, Math.Min(1.0, normalizedValue));
+                        // Map to full track height (with 10% padding on top and bottom)
+                        return trackBaseY + (0.1 + normalizedValue * 0.8) * trackHeight;
+                    }).ToArray();
+
+                    // Fill only the first curve
+                    if (isFirstCurve)
+                    {
+                        var fillYData = new List<double>(yData);
+                        fillYData.Add(trackBaseY + 0.1 * trackHeight); // Bottom boundary
+                        fillYData.Insert(0, trackBaseY + 0.1 * trackHeight); // Bottom boundary at start
+
+                        var fillXData = new List<double>(xData);
+                        fillXData.Add(xData[xData.Length - 1]); // Last X
+                        fillXData.Insert(0, xData[0]); // First X
+
+                        var polygon = plt.Add.Polygon(fillXData.ToArray(), fillYData.ToArray());
+                        polygon.FillColor = ScottPlot.Color.FromHex(color).WithAlpha(0.3);
+                        polygon.LineWidth = 0;
+
+                        isFirstCurve = false;
+                    }
+
+                    // Draw curve line
+                    var scatter = plt.Add.ScatterLine(xData, yData);
+                    scatter.Color = ScottPlot.Color.FromHex(color);
+                    scatter.LineWidth = (float)thickness;
+                }
+
+                // Add separator line between tracks
+                if (trackBand < trackCurves.Count - 1)
+                {
+                    double separatorY = (trackBand + 1) * trackHeight;
+                    var hline = plt.Add.HorizontalLine(separatorY);
+                    hline.Color = ScottPlot.Colors.Red;
+                    hline.LineWidth = 1;
+                    hline.LinePattern = ScottPlot.LinePattern.Dashed;
+                }
+
+                trackBand++;
+            }
+
+            // Add legend entries
+            foreach (var (trackName, curves) in trackCurves)
+            {
+                foreach (var (curveTitle, color, min, max, thickness, _) in curves)
+                {
+                    var dummyScatter = plt.Add.ScatterLine(new double[] { }, new double[] { });
+                    dummyScatter.Color = ScottPlot.Color.FromHex(color);
+                    dummyScatter.LineWidth = (float)thickness;
+                    dummyScatter.LegendText = $"{trackName} - {curveTitle} [{min:F1} to {max:F1}]";
+                }
+            }
+
+            plt.ShowLegend(Edge.Top);
+            plt.HideGrid();
+            plt.Grid.MajorLineColor = ScottPlot.Color.FromHex("#D3D3D3");
+            plt.ShowGrid();
+        }
+
+        private void DrawScotPlotVerticalMultiAxis(
+            ScottPlot.Plot plt,
+            List<string> trackNames,
+            List<(string trackName, List<(string curveTitle, string color, double min, double max, double thickness, List<double> data)>)> trackCurves,
+            int pointsPerTrack)
+        {
+            int nTracks = trackNames.Count;
+            const double trackWidth = 1.0; // Uniform track width
+
+            // Build custom tick labels
+            var customLabels = new List<string>();
+            foreach (var (trackName, curves) in trackCurves)
+            {
+                customLabels.Add(trackName);
+            }
+
+            // Set X axis to categorical with uniform spacing
+            double[] xPositions = Enumerable.Range(0, nTracks).Select(i => i * trackWidth + trackWidth * 0.5).ToArray();
+            plt.Axes.Bottom.TickGenerator = new ScottPlot.TickGenerators.NumericManual(xPositions, customLabels.ToArray());
+            plt.Axes.Bottom.TickLabelStyle.ForeColor = ScottPlot.Colors.Black;
+
+            // Increase bottom margin to accommodate scale labels
+            plt.Layout.Fixed(new ScottPlot.PixelPadding(100, 60, 60, 250));
+            plt.Axes.Margins(0, 0);
+
+            int trackBand = 0;
+            foreach (var (trackName, curves) in trackCurves)
+            {
+                double trackBaseX = trackBand * trackWidth;
+                bool isFirstCurve = true;
+
+                foreach (var (curveTitle, color, min, max, thickness, data) in curves)
+                {
+                    // Each curve uses the FULL track width with its own scale
+                    var yData = Enumerable.Range(0, data.Count).Select(i => (double)i).ToArray();
+                    var xData = data.Select(d =>
+                    {
+                        double normalizedValue = (d - min) / (max - min + 1e-9);
+                        normalizedValue = Math.Max(0.0, Math.Min(1.0, normalizedValue));
+                        // Map to full track width (with 10% padding on left and right)
+                        return trackBaseX + (0.1 + normalizedValue * 0.8) * trackWidth;
+                    }).ToArray();
+
+                    // Fill only the first curve
+                    if (isFirstCurve)
+                    {
+                        var fillXData = new List<double>(xData);
+                        fillXData.Add(trackBaseX + 0.1 * trackWidth); // Left boundary
+                        fillXData.Insert(0, trackBaseX + 0.1 * trackWidth); // Left boundary at start
+
+                        var fillYData = new List<double>(yData);
+                        fillYData.Add(yData[yData.Length - 1]); // Last Y
+                        fillYData.Insert(0, yData[0]); // First Y
+
+                        var polygon = plt.Add.Polygon(fillXData.ToArray(), fillYData.ToArray());
+                        polygon.FillColor = ScottPlot.Color.FromHex(color).WithAlpha(0.3);
+                        polygon.LineWidth = 0;
+
+                        isFirstCurve = false;
+                    }
+
+                    // Draw curve line
+                    var scatter = plt.Add.ScatterLine(xData, yData);
+                    scatter.Color = ScottPlot.Color.FromHex(color);
+                    scatter.LineWidth = (float)thickness;
+                }
+
+                // Add separator line between tracks
+                if (trackBand < trackCurves.Count - 1)
+                {
+                    double separatorX = (trackBand + 1) * trackWidth;
+                    var vline = plt.Add.VerticalLine(separatorX);
+                    vline.Color = ScottPlot.Colors.DarkRed;
+                    vline.LineWidth = 1;
+                    vline.LinePattern = ScottPlot.LinePattern.Dashed;
+                }
+
+                trackBand++;
+            }
+
+            // Add legend entries
+            foreach (var (trackName, curves) in trackCurves)
+            {
+                foreach (var (curveTitle, color, min, max, thickness, _) in curves)
+                {
+                    var dummyScatter = plt.Add.ScatterLine(new double[] { }, new double[] { });
+                    dummyScatter.Color = ScottPlot.Color.FromHex(color);
+                    dummyScatter.LineWidth = (float)thickness;
+                    dummyScatter.LegendText = $"{trackName} - {curveTitle} [{min:F1} to {max:F1}]";
+                }
+            }
+
+            plt.ShowLegend(Edge.Top);
             plt.HideGrid();
             plt.Grid.MajorLineColor = ScottPlot.Color.FromHex("#D3D3D3");
             plt.ShowGrid();
